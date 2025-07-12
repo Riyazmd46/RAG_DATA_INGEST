@@ -14,13 +14,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import os
-import tempfile
 import shutil
 from pathlib import Path
 import uvicorn
 
 from data_pipeline import RAGDataPipeline
 from config import Config
+
+# Directory to save uploaded files
+UPLOAD_DIR = os.path.join(os.path.dirname(__file__), 'uploaded_files')
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -98,25 +101,63 @@ async def health_check():
             api_key_configured=bool(Config.GEMINI_API_KEY),
             vector_db_accessible=False
         )
+    
 
-# Get statistics endpoint
-@app.get("/stats", response_model=StatsResponse)
-async def get_stats():
-    """Get statistics about the vector database."""
+# from typing import List, Dict, Optional
+# from pydantic import BaseModel
+
+# class CollectionStats(BaseModel):
+#     collection_name: str
+#     total_documents: int
+#     files: List[str] = []
+
+# class StatsResponse(BaseModel):
+#     total_collections: int
+#     persist_directory: Optional[str] = None
+#     collections: List[CollectionStats]
+
+
+# @app.get("/stats", response_model=StatsResponse)
+# async def get_stats():
+#     """Get statistics about the vector database."""
+#     try:
+#         retriever = pipeline.get_retriever()
+#         chroma_client = retriever.chroma_client  # Or however you access it
+#         persist_directory = retriever.persist_directory
+
+#         collections = chroma_client.list_collections()
+
+#         results = []
+#         for col_meta in collections:
+#             collection = chroma_client.get_collection(name=col_meta.name)
+#             data = collection.get()
+#             total_docs = len(data["ids"])
+#             files = list({m.get("source") for m in data["metadatas"] if m and "source" in m})
+
+#             results.append(CollectionStats(
+#                 collection_name=col_meta.name,
+#                 total_documents=total_docs,
+#                 files=files
+#             ))
+
+#         return StatsResponse(
+#             total_collections=len(collections),
+#             persist_directory=persist_directory,
+#             collections=results
+#         )
+
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=f"Error retrieving stats: {str(e)}")
+
+
+@app.get("/stats")
+def get_stats():
     try:
         retriever = pipeline.get_retriever()
         stats = retriever.get_stats()
-        
-        if not stats:
-            raise HTTPException(status_code=500, detail="Could not retrieve statistics")
-        
-        return StatsResponse(
-            total_documents=stats.get('total_documents', 0),
-            collection_name=stats.get('collection_name', 'Unknown'),
-            persist_directory=stats.get('persist_directory', 'Unknown')
-        )
+        return stats
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error retrieving stats: {str(e)}")
+        return {"error": f"Error retrieving stats: {e}"}
 
 # Process single file endpoint
 @app.post("/process/file", response_model=ProcessResponse)
@@ -136,40 +177,34 @@ async def process_file(
         if file.size and file.size > 100 * 1024 * 1024:
             raise HTTPException(status_code=400, detail="File too large (max 100MB)")
         
-        # Create temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as temp_file:
-            shutil.copyfileobj(file.file, temp_file)
-            temp_path = temp_file.name
+        # Save file to working directory
+        save_path = os.path.join(UPLOAD_DIR, file.filename)
+        with open(save_path, 'wb') as out_file:
+            shutil.copyfileobj(file.file, out_file)
         
-        try:
-            # Process the file
-            success = pipeline.process_and_ingest(
-                temp_path,
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap
+        # Process the file
+        success, documents_count = pipeline.process_and_ingest(
+            save_path,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap
+        )
+        
+        if success:
+            return ProcessResponse(
+                success=True,
+                message="File processed and ingested successfully",
+                file_name=file.filename,
+                file_type=pipeline.get_file_type(save_path),
+                chunks_created= documents_count
             )
-            
-            if success:
-                return ProcessResponse(
-                    success=True,
-                    message="File processed and ingested successfully",
-                    file_name=file.filename,
-                    file_type=pipeline.get_file_type(temp_path),
-                    chunks_created=1  # This could be enhanced to return actual chunk count
-                )
-            else:
-                return ProcessResponse(
-                    success=False,
-                    message="File processing failed",
-                    file_name=file.filename,
-                    file_type=pipeline.get_file_type(temp_path)
-                )
-        
-        finally:
-            # Clean up temporary file
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
-                
+        else:
+            return ProcessResponse(
+                success=False,
+                message="File processing failed",
+                file_name=file.filename,
+                file_type=pipeline.get_file_type(save_path)
+            )
+    
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
 
@@ -187,48 +222,39 @@ async def process_files(
             raise HTTPException(status_code=400, detail="No files provided")
         
         results = []
-        temp_files = []
         
-        try:
-            for file in files:
-                if not file.filename:
-                    continue
-                
-                # Check file size
-                if file.size and file.size > 100 * 1024 * 1024:
-                    results.append(ProcessResponse(
-                        success=False,
-                        message="File too large (max 100MB)",
-                        file_name=file.filename,
-                        file_type="unknown"
-                    ))
-                    continue
-                
-                # Create temporary file
-                with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as temp_file:
-                    shutil.copyfileobj(file.file, temp_file)
-                    temp_path = temp_file.name
-                    temp_files.append(temp_path)
-                
-                # Process the file
-                success = pipeline.process_and_ingest(
-                    temp_path,
-                    chunk_size=chunk_size,
-                    chunk_overlap=chunk_overlap
-                )
-                
+        for file in files:
+            if not file.filename:
+                continue
+            
+            # Check file size
+            if file.size and file.size > 100 * 1024 * 1024:
                 results.append(ProcessResponse(
-                    success=success,
-                    message="File processed successfully" if success else "File processing failed",
+                    success=False,
+                    message="File too large (max 100MB)",
                     file_name=file.filename,
-                    file_type=pipeline.get_file_type(temp_path)
+                    file_type="unknown"
                 ))
-        
-        finally:
-            # Clean up temporary files
-            for temp_path in temp_files:
-                if os.path.exists(temp_path):
-                    os.unlink(temp_path)
+                continue
+            
+            # Save file to working directory
+            save_path = os.path.join(UPLOAD_DIR, file.filename)
+            with open(save_path, 'wb') as out_file:
+                shutil.copyfileobj(file.file, out_file)
+            
+            # Process the file
+            success = pipeline.process_and_ingest(
+                save_path,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap
+            )
+            
+            results.append(ProcessResponse(
+                success=success,
+                message="File processed successfully" if success else "File processing failed",
+                file_name=file.filename,
+                file_type=pipeline.get_file_type(save_path)
+            ))
         
         return results
         
@@ -338,4 +364,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nServer stopped by user.")
     except Exception as e:
-        print(f"Error starting server: {e}") 
+        print(f"Error starting server: {e}")

@@ -53,7 +53,7 @@ class RAGDataPipeline:
                 doc = {
                     'content': chunk,
                     'metadata': {
-                        'file_path': file_path,
+                        'file_path': file_path,  # Always use the original local file path
                         'file_name': Path(file_path).name,
                         'file_type': 'text',
                         'chunk_index': i,
@@ -88,8 +88,8 @@ class RAGDataPipeline:
                     doc = {
                         'content': chunk,
                         'metadata': {
-                            'file_path': str(file_path),
-                            'file_name': str(Path(file_path).name),
+                            'file_path': file_path,  # Always use the original local file path
+                            'file_name': Path(file_path).name,
                             'file_type': 'pdf_text',
                             'chunk_index': str(i),
                             'total_chunks': str(len(text_chunks)),
@@ -110,8 +110,8 @@ class RAGDataPipeline:
                 doc = {
                     'content': table_summary,
                     'metadata': {
-                        'file_path': str(file_path),
-                        'file_name': str(Path(file_path).name),
+                        'file_path': file_path,  # Always use the original local file path
+                        'file_name': Path(file_path).name,
                         'file_type': 'pdf_table',
                         'table_index': str(table_idx),
                         'table_columns': str(table['columns']),
@@ -123,6 +123,24 @@ class RAGDataPipeline:
                 }
                 documents.append(doc)
             
+            # Process Images
+            for img_idx, img_info in enumerate(pdf_content.get('images', [])):
+                image_result = self.image_processor.process_image(img_info['image_path'])
+                doc = {
+                    'content': image_result['description'],
+                    'metadata': {
+                        'file_path': file_path,  # Always use the original local file path
+                        'file_name': Path(file_path).name,
+                        'file_type': 'pdf_image',
+                        'image_index': str(img_idx),
+                        'image_page': img_info.get('page', ''),
+                        'image_format': image_result.get('image_format', ''),
+                        'pdf_title': pdf_content['metadata']['title'],
+                        'pdf_author': pdf_content['metadata']['author'],
+                        'pdf_subject': pdf_content['metadata']['subject']
+                    }
+                }
+                documents.append(doc)
             return documents
         except Exception as e:
             print(f"Error processing PDF file {file_path}: {e}")
@@ -144,7 +162,7 @@ class RAGDataPipeline:
             doc = {
                 'content': image_result['description'],
                 'metadata': {
-                    'file_path': file_path,
+                    'file_path': file_path,  # Always use the original local file path
                     'file_name': Path(file_path).name,
                     'file_type': 'image',
                     'file_size': image_result.get('file_size', 0),
@@ -169,7 +187,7 @@ class RAGDataPipeline:
                     doc = {
                         'content': frame['description'],
                         'metadata': {
-                            'file_path': file_path,
+                            'file_path': file_path,  # Always use the original local file path
                             'file_name': Path(file_path).name,
                             'file_type': 'video_frame',
                             'frame_number': frame['frame_number'],
@@ -186,7 +204,7 @@ class RAGDataPipeline:
                 doc = {
                     'content': transcript,
                     'metadata': {
-                        'file_path': file_path,
+                        'file_path': file_path,  # Always use the original local file path
                         'file_name': Path(file_path).name,
                         'file_type': 'video_audio',
                         'language': audio_result['audio_transcription'].get('language', 'unknown'),
@@ -208,7 +226,7 @@ class RAGDataPipeline:
             doc = {
                 'content': audio_result['transcription']['transcript'],
                 'metadata': {
-                    'file_path': file_path,
+                    'file_path': file_path,  # Always use the original local file path
                     'file_name': Path(file_path).name,
                     'file_type': 'audio',
                     'language': audio_result['transcription'].get('language', 'unknown'),
@@ -243,13 +261,12 @@ class RAGDataPipeline:
             print(f"Unsupported file type: {file_path}")
             return []
     
-    def ingest_to_vector_db(self, documents: List[Dict[str, Any]]) -> bool:
-        """Ingest processed documents into vector database."""
+    def ingest_to_vector_db(self, documents: List[Dict[str, Any]]) -> (bool, int):
+        """Ingest processed documents into vector database. Returns (success, documents_count)."""
         try:
             if not documents:
                 print("No documents to ingest")
-                return False
-            
+                return False, 0
             # Generate embeddings for all documents
             embeddings = []
             for doc in documents:
@@ -258,42 +275,34 @@ class RAGDataPipeline:
                     embeddings.append(embedding)
                 else:
                     print(f"Failed to generate embedding for document: {doc.get('metadata', {}).get('file_name', 'unknown')}")
-                    return False
-            
+                    return False, 0
             # Add to vector database
-            success = self.vector_db.add_documents(documents, embeddings)
-            return success
-            
+            success, documents_count = self.vector_db.add_documents(documents, embeddings)
+            return success, documents_count
         except Exception as e:
             print(f"Error ingesting documents to vector database: {e}")
-            return False
+            return False, 0
     
     def process_and_ingest(self, file_path: str, chunk_size: int = None, 
-                          chunk_overlap: int = None) -> bool:
-        """Process a file and ingest it into the vector database."""
+                          chunk_overlap: int = None) -> (bool, int):
+        """Process a file and ingest it into the vector database. Returns (success, num_documents)."""
         try:
             print(f"Processing file: {file_path}")
-            
             # Process the file
             documents = self.process_file(file_path, chunk_size, chunk_overlap)
-            
             if not documents:
                 print(f"No documents generated from {file_path}")
-                return False
-            
+                return False, 0
             # Ingest to vector database
-            success = self.ingest_to_vector_db(documents)
-            
+            success, documents_count = self.ingest_to_vector_db(documents)
             if success:
                 print(f"Successfully processed and ingested {file_path}")
             else:
                 print(f"Failed to ingest {file_path}")
-            
-            return success
-            
+            return success, documents_count
         except Exception as e:
             print(f"Error processing and ingesting {file_path}: {e}")
-            return False
+            return False, 0
     
     def process_directory(self, directory_path: str, chunk_size: int = None, 
                          chunk_overlap: int = None) -> Dict[str, Any]:
@@ -312,7 +321,7 @@ class RAGDataPipeline:
                     if file_type != 'unknown':
                         results['total_files'] += 1
                         
-                        success = self.process_and_ingest(
+                        success, documents_count = self.process_and_ingest(
                             str(file_path), chunk_size, chunk_overlap
                         )
                         
@@ -365,4 +374,4 @@ class RAGRetriever:
     
     def get_stats(self) -> Dict[str, Any]:
         """Get statistics about the vector database."""
-        return self.vector_db.get_collection_stats() 
+        return self.vector_db.get_collection_stats()

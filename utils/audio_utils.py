@@ -2,7 +2,7 @@ import os
 import whisper
 from typing import Dict, Any, Optional
 from pydub import AudioSegment
-import tempfile
+# import tempfile
 from config import Config
 
 class AudioProcessor:
@@ -13,7 +13,7 @@ class AudioProcessor:
         """Extract audio from video file and return path to audio file."""
         try:
             # Create temporary file for audio
-            temp_audio_path = tempfile.mktemp(suffix='.wav')
+            temp_audio_path = os.path.splitext(video_path)[0] + "_extracted.wav"
             
             # Extract audio using pydub
             video = AudioSegment.from_file(video_path)

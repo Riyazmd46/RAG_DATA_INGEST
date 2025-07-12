@@ -3,6 +3,7 @@ from chromadb.config import Settings
 from typing import List, Dict, Any, Optional
 import os
 from config import Config
+from pathlib import Path
 
 class VectorDBManager:
     def __init__(self, persist_directory: Optional[str] = None, collection_name: Optional[str] = None):
@@ -31,13 +32,10 @@ class VectorDBManager:
                 print("No documents or embeddings provided")
                 return False
             
-            # Fix metadata for ChromaDB compatibility
-            from fix_metadata import fix_metadata_for_chromadb
-            
             # Prepare data for ChromaDB
-            ids = [f"doc_{i}" for i in range(len(documents))]
+            ids = [f"{Path(doc.get('metadata', {}).get('file_name', 'file'))}_chunk_{i}" for i, doc in enumerate(documents)]
             texts = [doc['content'] for doc in documents]
-            metadatas = [fix_metadata_for_chromadb(doc.get('metadata', {})) for doc in documents]
+            metadatas = [doc.get('metadata', {}) for doc in documents]
             
             # Add to collection
             self.collection.add(
@@ -48,7 +46,7 @@ class VectorDBManager:
             )
             
             print(f"Successfully added {len(documents)} documents to vector database")
-            return True
+            return True, len(documents)
             
         except Exception as e:
             print(f"Error adding documents to vector database: {e}")
@@ -81,17 +79,34 @@ class VectorDBManager:
             return []
     
     def get_collection_stats(self) -> Dict[str, Any]:
-        """Get statistics about the collection."""
+        """Get detailed statistics about the collection."""
         try:
             count = self.collection.count()
+
+            # Pull all documents (limit=max to inspect metadata)
+            results = self.collection.get(include=["metadatas"], limit=100_000)
+
+            metadatas = results.get("metadatas", [])
+            file_paths = [meta.get("file_path") for meta in metadatas if meta.get("file_path")]
+
+            unique_files = set(file_paths)
+            chunks_per_file = {}
+            for path in file_paths:
+                chunks_per_file[path] = chunks_per_file.get(path, 0) + 1
+
             return {
-                'total_documents': count,
-                'collection_name': self.collection_name,
-                'persist_directory': self.persist_directory
+                "collection_name": self.collection_name,
+                "persist_directory": self.persist_directory,
+                "total_documents": count,
+                "total_files": len(unique_files),
+                "files": list(unique_files),
+                "chunks_per_file": chunks_per_file
             }
+
         except Exception as e:
             print(f"Error getting collection stats: {e}")
-            return {}
+            return {"error": str(e)}
+
     
     def delete_collection(self) -> bool:
         """Delete the entire collection."""
@@ -125,4 +140,4 @@ class VectorDBManager:
             return True
         except Exception as e:
             print(f"Error deleting document: {e}")
-            return False 
+            return False
